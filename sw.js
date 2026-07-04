@@ -2,7 +2,7 @@
    Strateji: app kabugu (HTML + ikonlar) icin AGDAN-ONCE (network-first),
    cevrimdisi olunca cache'e dus. Firebase istekleri (canli veri, auth, token)
    HIC dokunulmadan dogrudan aga gider -> canli veri asla eskimeZ. */
-var CACHE = 'erdem-shell-v1';
+var CACHE = 'erdem-shell-v2';
 var SHELL = [
   './',
   './index.html',
