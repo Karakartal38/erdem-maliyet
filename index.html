@@ -941,6 +941,42 @@ var LS_DEVICE_KEY = 'erdem_maliyet_v7_device_id';
 var FB_READY = false;
 var FB_ID_TOKEN = '';
 var FB_REFRESH_TOKEN = '';
+var LS_AUTH_KEY = 'erdem_maliyet_v7_auth';
+// --- Oturumu bu cihazda hatirla: yenileme token'ini localStorage'a sakla ---
+function saveAuth(){
+  try{
+    if(FB_REFRESH_TOKEN){
+      localStorage.setItem(LS_AUTH_KEY, JSON.stringify({rt:FB_REFRESH_TOKEN, at:Date.now()}));
+    }
+  }catch(e){}
+}
+function loadSavedRefreshToken(){
+  try{
+    var raw=localStorage.getItem(LS_AUTH_KEY);
+    if(!raw) return '';
+    var o=JSON.parse(raw);
+    return (o && o.rt) ? o.rt : '';
+  }catch(e){ return ''; }
+}
+function clearAuth(){
+  try{ localStorage.removeItem(LS_AUTH_KEY); }catch(e){}
+  FB_ID_TOKEN=''; FB_REFRESH_TOKEN='';
+}
+function showLogoutBtn(){
+  if(document.getElementById('logoutBtn')) return;
+  var b=document.createElement('button');
+  b.id='logoutBtn';
+  b.textContent='Çıkış';
+  b.title='Bu cihazdaki giriş bilgisini unut';
+  b.style.cssText='position:fixed;left:16px;bottom:16px;z-index:99998;background:#242836;color:#9198ab;border:1px solid #2e3347;padding:7px 12px;border-radius:8px;font-weight:600;font-family:inherit;font-size:12px;cursor:pointer;opacity:.85';
+  b.onclick=function(){
+    if(confirm('Çıkış yapılsın mı? Bu cihazda tekrar şifre sormaya başlayacak.')){
+      clearAuth();
+      location.reload();
+    }
+  };
+  (document.body||document.documentElement).appendChild(b);
+}
 var AUTO_SAVE_TIMER = null;
 var SAVE_PENDING = false;
 var LAST_SAVED_HASH = '';
@@ -1240,6 +1276,7 @@ function signInFirebase(email, password){
     FB_ID_TOKEN = res.data.idToken || '';
     FB_REFRESH_TOKEN = res.data.refreshToken || '';
     if(!FB_ID_TOKEN) throw new Error('Token alinamadi');
+    saveAuth();
     return true;
   });
 }
@@ -1271,6 +1308,7 @@ function submitAuth(){
   showFBLoading('Giriş yapılıyor...');
   signInFirebase(email?email.value:'', pass?pass.value:'').then(function(){
     closeAuthGate();
+    showLogoutBtn();
     showFBLoading('Firebase\'den son fiyatlar yükleniyor...');
     loadFromFirebase();
   }).catch(function(e){
@@ -1575,6 +1613,7 @@ function refreshIdToken(){
     if(d && d.id_token){
       FB_ID_TOKEN = d.id_token;
       if(d.refresh_token) FB_REFRESH_TOKEN = d.refresh_token;
+      saveAuth();
       return true;
     }
     throw new Error('token yenilenemedi');
@@ -1960,7 +1999,25 @@ document.body.insertAdjacentHTML('beforeend',
   '<div id="fb-toast"></div>' +
   '<div id="fb-sync"></div>'
 );
-openAuthGate();
+// Bu cihazda daha once giris yapildiysa: sifre sormadan otomatik oturum ac
+(function(){
+  var savedRt = loadSavedRefreshToken();
+  if(savedRt){
+    FB_REFRESH_TOKEN = savedRt;
+    showFBLoading('Oturum açılıyor...');
+    refreshIdToken().then(function(){
+      showLogoutBtn();
+      showFBLoading('Firebase\'den son fiyatlar yükleniyor...');
+      loadFromFirebase();
+    }).catch(function(){
+      clearAuth();
+      hideFBLoading();
+      openAuthGate();
+    });
+  } else {
+    openAuthGate();
+  }
+})();
 </script>
 </body>
 </html>
