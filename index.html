@@ -5,6 +5,45 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Erdem Yatakları - Maliyet Yönetim Sistemi</title>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- PWA: bilgisayara/telefona uygulama gibi yuklenebilir -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Erdem Maliyet">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script>
+/* Service worker kaydi - yuklenebilirlik + cevrimdisi kabuk */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('SW kaydi basarisiz', e); });
+  });
+}
+/* "Uygulamayi Yukle" butonu (Chrome/Edge) */
+(function () {
+  var deferred = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault(); deferred = e; showInstallBtn();
+  });
+  function showInstallBtn() {
+    if (document.getElementById('pwaInstallBtn')) return;
+    var b = document.createElement('button');
+    b.id = 'pwaInstallBtn';
+    b.textContent = '⬇ Uygulamayı Yükle';
+    b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;background:#f59e0b;color:#0f1117;border:none;padding:10px 16px;border-radius:10px;font-weight:700;font-family:inherit;font-size:13px;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.4)';
+    b.onclick = function () {
+      if (!deferred) return;
+      deferred.prompt();
+      deferred.userChoice.then(function () { deferred = null; b.remove(); });
+    };
+    (document.body || document.documentElement).appendChild(b);
+  }
+  window.addEventListener('appinstalled', function () {
+    var b = document.getElementById('pwaInstallBtn'); if (b) b.remove();
+  });
+})();
+</script>
 <style>
 /* ══════════ Tasarım değişkenleri (design tokens) ══════════ */
 /* Değişken adları (--bg, --s, --a, ...) JS inline stillerinde kullanılıyor — adlar sabit. */
@@ -207,6 +246,10 @@ select.fs:focus{outline:none;border-color:var(--a);box-shadow:var(--ring)}
   .pbb .sep{display:none}
   .si{width:100%}
 }
+#fb-loading{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(15,17,23,0.93);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px}
+#fb-loading .spin{width:48px;height:48px;border:4px solid rgba(245,158,11,0.2);border-top-color:#f59e0b;border-radius:50%;animation:sp 0.8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+#fb-loading p{color:#9198ab;font-size:14px;font-family:'Plus Jakarta Sans',sans-serif}
 </style>
 </head>
 <body>
@@ -1267,7 +1310,7 @@ function restoreLocalRevision(idx){
   }
   if(Array.isArray(item.snap.materials)) D.materials=item.snap.materials;
   MANUAL_EDIT = false;
-  saveToLocal();
+  saveToLocal();autoSave();
   rXNav();
   clm();
   R();
@@ -1592,64 +1635,815 @@ function saveToLocal(){
   toast('\u2705 Kaydedildi', 'ok', 2500);
 }
 
-// Uyumluluk — eski kodda saveToFirebase çağıran yerler için alias
-var saveToFirebase = saveToLocal;
-
-// Debounced otomatik kayıt
-function autoSave(){
-  clearTimeout(AUTO_SAVE_TIMER);
-  AUTO_SAVE_TIMER = setTimeout(saveToLocal, 2000);
+/* ==== ONLINE PERSISTENCE LAYER (Firebase + Auth + PWA) — v12 tabani uzerine transplante ==== */
+var FB_WRITE_OK = true;
+var FB_URL = 'https://erdem-yay-default-rtdb.europe-west1.firebasedatabase.app/erdem/prices';
+// Firebase Auth (email/password) - program ici giris zorunlulugu
+// Not: FB_API_KEY degerini Firebase Project Settings > Web API Key ile doldurun.
+var FB_API_KEY = 'AIzaSyCnuylxO3mlM749JZfywQImHADnvtpGkUE';
+var LS_KEY = 'erdem_maliyet_v7_local_backup';
+var LS_REV_KEY = 'erdem_maliyet_v7_local_revisions';
+var LS_DEVICE_KEY = 'erdem_maliyet_v7_device_id';
+var FB_READY = false;
+var FB_ID_TOKEN = '';
+var FB_REFRESH_TOKEN = '';
+var LS_AUTH_KEY = 'erdem_maliyet_v7_auth';
+// --- Oturumu bu cihazda hatirla: yenileme token'ini localStorage'a sakla ---
+function saveAuth(){
+  try{
+    if(FB_REFRESH_TOKEN){
+      localStorage.setItem(LS_AUTH_KEY, JSON.stringify({rt:FB_REFRESH_TOKEN, at:Date.now()}));
+    }
+  }catch(e){}
+}
+function loadSavedRefreshToken(){
+  try{
+    var raw=localStorage.getItem(LS_AUTH_KEY);
+    if(!raw) return '';
+    var o=JSON.parse(raw);
+    return (o && o.rt) ? o.rt : '';
+  }catch(e){ return ''; }
+}
+function clearAuth(){
+  try{ localStorage.removeItem(LS_AUTH_KEY); }catch(e){}
+  FB_ID_TOKEN=''; FB_REFRESH_TOKEN='';
+}
+function showLogoutBtn(){
+  if(document.getElementById('logoutBtn')) return;
+  var b=document.createElement('button');
+  b.id='logoutBtn';
+  b.textContent='Çıkış';
+  b.title='Bu cihazdaki giriş bilgisini unut';
+  b.style.cssText='position:fixed;left:16px;bottom:16px;z-index:99998;background:#242836;color:#9198ab;border:1px solid #2e3347;padding:7px 12px;border-radius:8px;font-weight:600;font-family:inherit;font-size:12px;cursor:pointer;opacity:.85';
+  b.onclick=function(){
+    if(confirm('Çıkış yapılsın mı? Bu cihazda tekrar şifre sormaya başlayacak.')){
+      clearAuth();
+      location.reload();
+    }
+  };
+  (document.body||document.documentElement).appendChild(b);
 }
 
-// Input değişikliklerini dinle
+function fbAuthQuery(){
+  return FB_ID_TOKEN ? ('?auth=' + encodeURIComponent(FB_ID_TOKEN)) : '';
+}
+function signInFirebase(email, password){
+  var em=String(email||'').trim();
+  var pw=String(password||'');
+  if(!em || !pw) return Promise.reject(new Error('Email ve sifre gerekli'));
+  if(!FB_API_KEY || FB_API_KEY.indexOf('REPLACE_')===0){
+    return Promise.reject(new Error('FB_API_KEY ayarlanmamis'));
+  }
+  return fetch('https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key='+encodeURIComponent(FB_API_KEY),{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email:em,password:pw,returnSecureToken:true})
+  }).then(function(r){
+    return r.json().then(function(d){ return {ok:r.ok,data:d}; });
+  }).then(function(res){
+    if(!res.ok){
+      var msg=(res.data && res.data.error && res.data.error.message) ? res.data.error.message : 'Giris basarisiz';
+      throw new Error(msg);
+    }
+    FB_ID_TOKEN = res.data.idToken || '';
+    FB_REFRESH_TOKEN = res.data.refreshToken || '';
+    if(!FB_ID_TOKEN) throw new Error('Token alinamadi');
+    saveAuth();
+    return true;
+  });
+}
+function openAuthGate(){
+  var holder=document.getElementById('auth-gate');
+  if(!holder) return;
+  holder.style.display='flex';
+  holder.innerHTML='<div style="background:var(--s);border:1px solid var(--br);border-radius:12px;padding:22px;width:min(420px,92vw)">'+
+    '<h3 style="margin:0 0 10px">🔒 Güvenli Giriş</h3>'+
+    '<p style="font-size:12px;color:var(--t2);margin:0 0 12px">Uygulamaya erişmek için yetkili kullanıcı ile giriş yapın.</p>'+
+    '<div style="display:grid;gap:8px">'+
+      '<input id="authEmail" class="si" placeholder="Email" style="width:100%">'+
+      '<input id="authPass" class="si" type="password" placeholder="Şifre" style="width:100%">'+
+    '</div>'+
+    '<div id="authErr" style="min-height:18px;color:#f87171;font-size:12px;margin-top:8px"></div>'+
+    '<div style="text-align:right;margin-top:10px"><button class="bt bt-g" onclick="submitAuth()">Giriş Yap</button></div>'+
+  '</div>';
+  setTimeout(function(){ var x=document.getElementById('authEmail'); if(x) x.focus(); },50);
+}
+function closeAuthGate(){
+  var holder=document.getElementById('auth-gate');
+  if(holder){ holder.style.display='none'; holder.innerHTML=''; }
+}
+function submitAuth(){
+  var email=document.getElementById('authEmail');
+  var pass=document.getElementById('authPass');
+  var err=document.getElementById('authErr');
+  if(err) err.textContent='Giriş kontrol ediliyor...';
+  showFBLoading('Giriş yapılıyor...');
+  signInFirebase(email?email.value:'', pass?pass.value:'').then(function(){
+    closeAuthGate();
+    showLogoutBtn();
+    showFBLoading('Firebase\'den son fiyatlar yükleniyor...');
+    loadFromFirebase();
+  }).catch(function(e){
+    hideFBLoading();
+    if(err) err.textContent='Giriş hatası: '+(e && e.message ? e.message : e);
+  });
+}
+
+function fbGet(){
+  return fetch(FB_URL + '.json' + fbAuthQuery()).then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  });
+}
+function fbSet(data){
+  var body = typeof data === 'string' ? data : JSON.stringify(data);
+  return fetch(FB_URL + '.json' + fbAuthQuery(), {
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body: body
+  }).then(function(r){
+    if(!r.ok) return r.text().then(function(t){ throw new Error('HTTP '+r.status+': '+t.substring(0,120)); });
+    return r;
+  });
+}
+
+function hideFBLoading(){
+  var el = document.getElementById('fb-loading');
+  if(el) el.style.display = 'none';
+}
+function showFBLoading(msg){
+  var el = document.getElementById('fb-loading');
+  if(!el) return;
+  var p = el.querySelector('p');
+  if(p && msg) p.textContent = msg;
+  el.style.display = 'flex';
+}
+
+// Firebase'den yükle — tüm veriyi S üzerine uygula
+// Firebase array'leri {0:x, 1:y} objesine çevirebilir — toArr ile düzelt
+function toArr(v){
+  if(Array.isArray(v)) return v.filter(function(x){return x!=null;});
+  if(v && typeof v==='object'){
+    var keys=Object.keys(v);
+    var isNumeric=keys.length>0 && keys.every(function(k){return /^\d+$/.test(k);});
+    if(isNumeric){
+      var arr=[];
+      keys.forEach(function(k){if(v[k]!=null) arr.push(v[k]);});
+      return arr;
+    }
+  }
+  return [];
+}
+
+function loadFromFirebase(){
+  var local = loadLocalBackup();
+  if(local.ok){
+    rXNav();
+    R();
+    toast('🟡 Yerel yedek yüklendi', '', 1400);
+  }
+  fbGet().then(function(data){
+    if(!data || typeof data !== 'object'){
+      console.log('Firebase boş veya geçersiz veri döndü');
+      FB_READY = true; hideFBLoading(); rXNav(); R();
+      return;
+    }
+    console.log('Firebase veri yüklendi, key sayısı:', Object.keys(data).length);
+    applyServerData(data);
+
+    var fbTs = Date.parse(data && data.at ? data.at : '') || 0;
+    var shouldSyncLocalToCloud = !!(local.ok && local.ts > fbTs);
+
+    FB_READY = true;
+    hideFBLoading();
+    rXNav();
+    R();
+    LAST_MP_VALUES = snapshotMP();
+    startLiveSync();
+    if(shouldSyncLocalToCloud){
+      saveToFirebase();
+      toast('🟡 Yerel daha yeni veri buluta senkronlanıyor', '', 2800);
+    }
+    toast('✅ Tüm veriler yüklendi', 'ok', 2000);
+  }).catch(function(e){
+    console.error('Firebase yükleme hatası:', e);
+    FB_READY = true;
+    FB_WRITE_OK = false;
+    hideFBLoading();
+    rXNav();
+    R();
+    toast('⚠️ Çevrimdışı mod — yerel yedek aktif', 'err', 4000);
+  });
+}
+
+function applyServerData(data){
+  if(!data || typeof data!=='object') return false;
+
+    // Hammadde fiyatları (array format: [{p:name, v:price}] veya eski object format)
+    if(data.mp){
+      var mpList = toArr(data.mp);
+      if(mpList.length > 0){
+        mpList.forEach(function(item){ if(item && item.p) S.mp[item.p] = item.v; });
+      } else if(typeof data.mp === 'object'){
+        // Eski object format (backward compat)
+        Object.keys(data.mp).forEach(function(k){ S.mp[k] = data.mp[k]; });
+      }
+    }
+    // Kâr oranları (grup)
+    if(data.pr){
+      Object.keys(data.pr).forEach(function(k){ S.pr[k] = data.pr[k]; });
+    }
+    // Model bazlı kâr oranları (decode keys)
+    if(data.mpr){
+      Object.keys(data.mpr).forEach(function(k){ S.mpr[fbDec(k)] = data.mpr[k]; });
+    }
+    // KDV
+    if(data.kdv != null) S.kdv = data.kdv;
+    // Genel gider oranları
+    if(data.oh){
+      ['gu','an','fn','am','sn','fr'].forEach(function(k){ if(data.oh[k]!=null) S.oh[k]=data.oh[k]; });
+      if(data.oh.extra) S.oh.extra = toArr(data.oh.extra);
+    }
+    // Kanepe gider oranları
+    if(data.koh){
+      ['gu','an','fn','am','sn','fr'].forEach(function(k){ if(data.koh[k]!=null) S.koh[k]=data.koh[k]; });
+      if(data.koh.isSabit!=null) S.koh.is_sabit=data.koh.isSabit;
+      if(data.koh.is_sabit!=null) S.koh.is_sabit=data.koh.is_sabit;
+    }
+    // İşçilik oranları (decode keys)
+    if(data.isc){
+      Object.keys(data.isc).forEach(function(grp){
+        var realGrp = fbDec(grp);
+        if(!S.isc[realGrp]) S.isc[realGrp]={};
+        if(data.isc[grp] && typeof data.isc[grp]==='object'){
+          Object.keys(data.isc[grp]).forEach(function(m){ S.isc[realGrp][fbDec(m)]=data.isc[grp][m]; });
+        }
+      });
+    }
+    // Tekstil reçeteleri (decode keys + array fix)
+    if(data.tr){
+      S.tr = {};
+      Object.keys(data.tr).forEach(function(k){
+        S.tr[fbDec(k)] = toArr(data.tr[k]);
+      });
+    }
+    if(data.trm && typeof data.trm==='object'){
+      S.trMeta = {};
+      Object.keys(data.trm).forEach(function(k){
+        var mk=fbDec(k);
+        var mv=data.trm[k]||{};
+        S.trMeta[mk]={type:tTypeKey(mv.type)};
+      });
+    }
+    if(data.tgm && typeof data.tgm==='object'){
+      S.tgm = {};
+      Object.keys(data.tgm).forEach(function(k){
+        var mk=fbDec(k);
+        var v=parseFloat(data.tgm[k]);
+        if(isFinite(v) && v>=0) S.tgm[mk]=v;
+      });
+    }
+    if(data.kgm && typeof data.kgm==='object'){
+      S.kgm = {};
+      Object.keys(data.kgm).forEach(function(k){
+        var mk=fbDec(k);
+        var v=parseFloat(data.kgm[k]);
+        if(isFinite(v) && v>=0) S.kgm[mk]=v;
+      });
+    }
+    if(data.sgm && typeof data.sgm==='object'){
+      S.sgm = {};
+      Object.keys(data.sgm).forEach(function(g){
+        var realGrp=fbDec(g);
+        S.sgm[realGrp]={};
+        var gmByModel=data.sgm[g]||{};
+        Object.keys(gmByModel).forEach(function(mk){
+          var realModel=fbDec(mk);
+          var bySize=gmByModel[mk]||{};
+          S.sgm[realGrp][realModel]={};
+          Object.keys(bySize).forEach(function(sz){
+            var v=parseFloat(bySize[sz]);
+            if(isFinite(v) && v>=0) S.sgm[realGrp][realModel][sz]=v;
+          });
+        });
+      });
+    }
+    if(data.tpr != null) S.pr.tekstil = data.tpr;
+    if(data.alog) S.audit = toArr(data.alog);
+    if(data.xmeta && typeof data.xmeta==='object'){
+      S.xmeta={};
+      Object.keys(data.xmeta).forEach(function(k){ S.xmeta[fbDec(k)] = data.xmeta[k]; });
+    }
+    if(data.xpr && typeof data.xpr==='object'){
+      Object.keys(data.xpr).forEach(function(k){ S.pr[fbDec(k)] = data.xpr[k]; });
+    }
+
+    // Yatak reçeteleri (decode keys + array fix)
+    if(data.yr && typeof data.yr === 'object' && Object.keys(data.yr).length > 0){
+      S.yr = {};
+      Object.keys(data.yr).forEach(function(k){
+        var items = toArr(data.yr[k]);
+        // Her item'ın q ve co'sunu da kontrol et (Firebase nested objeye çevirebilir)
+        S.yr[fbDec(k)] = items.map(function(it){
+          if(!it) return it;
+          // q objesi korunmalı (key'ler "90x190" gibi, yasak karakter yok)
+          return it;
+        });
+      });
+      console.log('Yatak modelleri yüklendi:', Object.keys(S.yr).length);
+    }
+    // Başlık reçeteleri (decode keys + array fix)
+    if(data.brr && typeof data.brr === 'object' && Object.keys(data.brr).length > 0){
+      S.br = {};
+      Object.keys(data.brr).forEach(function(k){
+        S.br[fbDec(k)] = toArr(data.brr[k]);
+      });
+      console.log('Başlık modelleri yüklendi:', Object.keys(S.br).length);
+    }
+    // Baza reçeteleri (decode keys + array fix)
+    if(data.bzrr && typeof data.bzrr === 'object' && Object.keys(data.bzrr).length > 0){
+      S.bzr = {};
+      Object.keys(data.bzrr).forEach(function(k){
+        S.bzr[fbDec(k)] = toArr(data.bzrr[k]);
+      });
+      console.log('Baza modelleri yüklendi:', Object.keys(S.bzr).length);
+    }
+    // Kanepe reçeteleri (decode keys + array fix)
+    if(data.krr && typeof data.krr === 'object' && Object.keys(data.krr).length > 0){
+      S.kr = {};
+      Object.keys(data.krr).forEach(function(k){
+        S.kr[fbDec(k)] = toArr(data.krr[k]);
+      });
+      console.log('Kanepe modelleri yüklendi:', Object.keys(S.kr).length);
+    }
+    if(data.xgr && typeof data.xgr==='object'){
+      S.xg={};
+      Object.keys(data.xgr).forEach(function(g){
+        var gk=fbDec(g);
+        S.xg[gk]={};
+        if(data.xgr[g] && typeof data.xgr[g]==='object'){
+          Object.keys(data.xgr[g]).forEach(function(m){
+            S.xg[gk][fbDec(m)] = toArr(data.xgr[g][m]);
+          });
+        }
+      });
+    }
+    // Hammadde listesi (yeni eklenmiş materyaller + array fix)
+    if(data.mats){
+      var matsList = toArr(data.mats);
+      if(matsList.length > 0){
+        // Firebase'deki listeyi D.materials ile birleştir
+        var existingNames = {};
+        matsList.forEach(function(m){ if(m && m.p) existingNames[m.p]=true; });
+        // D'de olup firebase'de olmayanları ekle
+        D.materials.forEach(function(m){
+          if(!existingNames[m.p]){
+            matsList.push({p:m.p, pr:m.pr, u:m.u||'', c:m.c||'', a:m.a||''});
+          }
+        });
+        D.materials = matsList;
+        // mp'yi güncelle
+        D.materials.forEach(function(m){
+          if(S.mp[m.p] === undefined) S.mp[m.p] = m.pr;
+        });
+        console.log('Hammadde listesi yüklendi:', D.materials.length);
+      }
+    }
+
+  return true;
+}
+
+// ====== CANLI SENKRONIZASYON (real-time) ======
+var FB_STREAM = null;
+var LIVE_REFRESH_TIMER = null;
+var LIVE_DEBOUNCE = null;
+
+function isEditingNow(){
+  var a = document.activeElement;
+  if(!a) return false;
+  var tag = a.tagName;
+  return tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT';
+}
+
+function refreshIdToken(){
+  if(!FB_REFRESH_TOKEN) return Promise.reject(new Error('refresh token yok'));
+  if(!FB_API_KEY) return Promise.reject(new Error('api key yok'));
+  return fetch('https://securetoken.googleapis.com/v1/token?key='+encodeURIComponent(FB_API_KEY),{
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'grant_type=refresh_token&refresh_token='+encodeURIComponent(FB_REFRESH_TOKEN)
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if(d && d.id_token){
+      FB_ID_TOKEN = d.id_token;
+      if(d.refresh_token) FB_REFRESH_TOKEN = d.refresh_token;
+      saveAuth();
+      return true;
+    }
+    throw new Error('token yenilenemedi');
+  });
+}
+
+// Akistan haber gelince tum veriyi yeniden cek ve uygula (sade ve guvenli)
+function liveRefetch(){
+  // Yerelde kaydedilmemis degisiklik VEYA aktif duzenleme varsa: sunucu verisini uygulama,
+  // kullanicinin isini ezmeyelim. Biraz sonra tekrar dene.
+  if(MANUAL_EDIT || SAVE_PENDING || isEditingNow()){
+    clearTimeout(LIVE_DEBOUNCE);
+    LIVE_DEBOUNCE = setTimeout(liveRefetch, 1500);
+    return;
+  }
+  fbGet().then(function(data){
+    if(!data || typeof data!=='object') return;
+    // Yeniden kontrol: fetch donerken kullanici yazmaya baslamis olabilir
+    if(MANUAL_EDIT || SAVE_PENDING || isEditingNow()){
+      clearTimeout(LIVE_DEBOUNCE);
+      LIVE_DEBOUNCE = setTimeout(liveRefetch, 1500);
+      return;
+    }
+    applyServerData(data);
+    LAST_MP_VALUES = snapshotMP();
+    saveLocalBackup({S:S,materials:D.materials,at:new Date().toISOString()});
+    rXNav();
+    R();
+    setSyncStatus('\ud83d\udd04 Canli guncellendi ('+(new Date()).toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'})+')','ok');
+  }).catch(function(e){ console.warn('liveRefetch hata', e); });
+}
+
+function onStreamEvent(){
+  clearTimeout(LIVE_DEBOUNCE);
+  LIVE_DEBOUNCE = setTimeout(liveRefetch, 400); // patlama halinde olaylari birlestir
+}
+
+function startLiveSync(){
+  if(typeof EventSource==='undefined'){ console.warn('EventSource yok, canli sync kapali'); return; }
+  try{ if(FB_STREAM) FB_STREAM.close(); }catch(e){}
+  var url = FB_URL + '.json' + (FB_ID_TOKEN ? ('?auth='+encodeURIComponent(FB_ID_TOKEN)) : '');
+  var es;
+  try{ es = new EventSource(url); }catch(e){ console.warn('EventSource acilamadi', e); return; }
+  FB_STREAM = es;
+  es.addEventListener('put', onStreamEvent);
+  es.addEventListener('patch', onStreamEvent);
+  es.onopen = function(){ setSyncStatus('\ud83d\udfe2 Canli baglandi','ok'); };
+  es.onerror = function(){
+    // Baglanti koptu (cogu zaman token suresi doldu). Token yenile + yeniden baglan.
+    try{ es.close(); }catch(e){}
+    FB_STREAM = null;
+    setSyncStatus('Canli baglanti yenileniyor...','saving');
+    refreshIdToken().then(function(){ setTimeout(startLiveSync, 1000); })
+                    .catch(function(){ setTimeout(startLiveSync, 5000); });
+  };
+  // Token suresi ~1 saat: 50 dakikada bir proaktif yenile + yeniden baglan
+  clearTimeout(LIVE_REFRESH_TIMER);
+  LIVE_REFRESH_TIMER = setTimeout(function(){
+    refreshIdToken().then(function(){ startLiveSync(); }).catch(function(){ startLiveSync(); });
+  }, 50*60*1000);
+}
+
+// Firebase key encoder/decoder — Firebase key'lerde . $ # [ ] / yasak
+function fbEnc(k){ return String(k).replace(/[.#$/\[\]]/g, function(c){ return '_' + c.charCodeAt(0).toString(16) + '_'; }); }
+function fbDec(k){ return String(k).replace(/_([0-9a-f]{2})_/gi, function(m, hex){ return String.fromCharCode(parseInt(hex, 16)); }); }
+
+// Firebase'e kaydet
+function saveToFirebase(){
+  if(!FB_READY || SAVE_PENDING) return;
+  SAVE_PENDING = true;
+  toast('💾 Kaydediliyor...', 'saving', 60000);
+  setSyncStatus('Buluta yazılıyor...','saving');
+
+  // 1) Veri doğrulama: hatalı reçete/fiyat kaydı engellensin
+  try{
+    validateState();
+  }catch(ve){
+    SAVE_PENDING = false;
+    var vmsg = (ve && ve.message ? ve.message : String(ve||'Bilinmeyen doğrulama hatası'));
+    setSyncStatus('Doğrulama hatası: '+vmsg.substring(0,90),'err');
+    toast('⚠️ '+vmsg, 'err', 8000);
+    MANUAL_EDIT = false;
+    return;
+  }
+
+  // 2) Fiyat eşiği: kullanıcıdan onay iste
+  if(MANUAL_EDIT && !BEFORE_UNLOAD){
+    var ok = checkPriceWarning();
+    if(!ok){
+      SAVE_PENDING = false;
+      setSyncStatus('Kaydetme iptal edildi','err');
+      toast('Kaydetme iptal edildi', 'err', 3500);
+      MANUAL_EDIT = false;
+      return;
+    }
+  }
+
+  // Firebase kuralları: boş string key yasak, null/undefined/NaN yasak, _ ile başlayan key yasak
+  function safeN(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
+  function validKey(k){ return k && k.trim()!=='' && k.charAt(0)!=='.'; }
+
+  // Model kar oranları
+  var mprClean = {};
+  Object.keys(S.mpr||{}).forEach(function(k){
+    if(!validKey(k)) return;
+    if(S.mpr[k]!==undefined && S.mpr[k]!==null) mprClean[fbEnc(k)] = safeN(S.mpr[k]);
+  });
+
+  // Işçilik - _default ve _ ile başlayan keyler çıkar
+  var iscClean = {};
+  Object.keys(S.isc||{}).forEach(function(grp){
+    if(!validKey(grp) || grp.charAt(0)==='_') return;
+    var src = S.isc[grp];
+    if(!src || typeof src !== 'object') return;
+    var g = {};
+    Object.keys(src).forEach(function(k){
+      if(!validKey(k) || k.charAt(0)==='_') return;
+      g[fbEnc(k)] = safeN(src[k]);
+    });
+    if(Object.keys(g).length > 0) iscClean[fbEnc(grp)] = g;
+  });
+
+  // Tekstil reçeteleri
+  var trClean = {};
+  Object.keys(S.tr||{}).forEach(function(modelKey){
+    if(!validKey(modelKey)) return;
+    var items = S.tr[modelKey];
+    if(!Array.isArray(items)) return;
+    trClean[fbEnc(modelKey)] = items.filter(function(it){ return it && validKey(it.p); });
+  });
+  var trMetaClean = {};
+  Object.keys(S.trMeta||{}).forEach(function(modelKey){
+    if(!validKey(modelKey)) return;
+    var tm=S.trMeta[modelKey]||{};
+    trMetaClean[fbEnc(modelKey)]={type:tTypeKey(tm.type)};
+  });
+  var tgmClean = {};
+  Object.keys(S.tgm||{}).forEach(function(modelKey){
+    if(!validKey(modelKey)) return;
+    var v=parseFloat(S.tgm[modelKey]);
+    if(isFinite(v) && v>=0) tgmClean[fbEnc(modelKey)]=v;
+  });
+  var kgmClean = {};
+  Object.keys(S.kgm||{}).forEach(function(modelKey){
+    if(!validKey(modelKey)) return;
+    var v=parseFloat(S.kgm[modelKey]);
+    if(isFinite(v) && v>=0) kgmClean[fbEnc(modelKey)]=v;
+  });
+  var sgmClean = {};
+  Object.keys(S.sgm||{}).forEach(function(grp){
+    if(!validKey(grp)) return;
+    var gmByModel=S.sgm[grp]||{};
+    var go={};
+    Object.keys(gmByModel).forEach(function(modelKey){
+      if(!validKey(modelKey)) return;
+      var bySize=gmByModel[modelKey]||{};
+      var so={};
+      Object.keys(bySize).forEach(function(sz){
+        var v=parseFloat(bySize[sz]);
+        if(isFinite(v) && v>=0) so[sz]=v;
+      });
+      if(Object.keys(so).length) go[fbEnc(modelKey)]=so;
+    });
+    if(Object.keys(go).length) sgmClean[fbEnc(grp)]=go;
+  });
+
+  // Tüm hammadde fiyatları — ARRAY olarak kaydet (key'lerde / # . vb. yasak)
+  var mpArr = [];
+  D.materials.forEach(function(m){
+    if(!m.p || !m.p.trim()) return;
+    mpArr.push({p: m.p, v: safeN(S.mp[m.p] !== undefined ? S.mp[m.p] : m.pr)});
+  });
+  Object.keys(S.mp||{}).forEach(function(k){
+    if(!k || !k.trim()) return;
+    var exists = mpArr.some(function(x){ return x.p===k; });
+    if(!exists) mpArr.push({p: k, v: safeN(S.mp[k])});
+  });
+
+  // Yeni eklenen hammaddeler (D'de olmayan)
+  var newMats = [];
+  D.materials.forEach(function(m){
+    // Sadece orijinal D listesindeki materyalleri kaydet
+    newMats.push({p:m.p, pr:safeN(m.pr), u:m.u||'', c:m.c||'', a:m.a||''});
+  });
+
+  // Yatak/Başlık/Baza reçeteleri (tam kaydet)
+  function cleanSizedRecipes(recs){
+    if(!recs) return {};
+    var out={};
+    Object.keys(recs).forEach(function(model){
+      if(!validKey(model)) return;
+      var items=recs[model];
+      if(!Array.isArray(items)) return;
+      out[fbEnc(model)]=items.map(function(it){
+        var ci={p:it.p||'',u:it.u||'',up:safeN(it.up),c:it.c||''};
+        if(it.q && typeof it.q==='object'){ci.q={};Object.keys(it.q).forEach(function(sz){ci.q[sz]=safeN(it.q[sz])});}
+        if(it.co && typeof it.co==='object'){ci.co={};Object.keys(it.co).forEach(function(sz){ci.co[sz]=safeN(it.co[sz])});}
+        return ci;
+      });
+    });
+    return out;
+  }
+
+  // Kanepe reçeteleri (tam kaydet)
+  function cleanKRecipes(recs){
+    if(!recs) return {};
+    var out={};
+    Object.keys(recs).forEach(function(model){
+      if(!validKey(model)) return;
+      var items=recs[model];
+      if(!Array.isArray(items)) return;
+      out[fbEnc(model)]=items.map(function(it){
+        return {p:it.p||'',up:safeN(it.up),qty:safeN(it.qty),co:safeN(it.co)};
+      });
+    });
+    return out;
+  }
+
+  // Özel ana gruplar
+  var xgrClean={};
+  Object.keys(S.xg||{}).forEach(function(grp){
+    if(!validKey(grp)) return;
+    xgrClean[fbEnc(grp)] = cleanSizedRecipes(S.xg[grp]);
+  });
+  var xprClean={};
+  Object.keys(S.xg||{}).forEach(function(grp){
+    if(!validKey(grp)) return;
+    xprClean[fbEnc(grp)] = safeN(S.pr[grp]||20);
+  });
+  var xmetaClean={};
+  Object.keys(S.xmeta||{}).forEach(function(grp){
+    if(!validKey(grp)) return;
+    var m=S.xmeta[grp]||{};
+    xmetaClean[fbEnc(grp)]={name:cleanName(m.name||grp),icon:cleanName(m.icon||'🧩')};
+  });
+  var auditLog = Array.isArray(S.audit) ? S.audit.slice(-199) : [];
+  var auditEntry = buildAuditEntry();
+  if(auditEntry) auditLog.push(auditEntry);
+  S.audit = auditLog;
+
+  var payload = {
+    mp:  mpArr,
+    pr:  { yatak:safeN(S.pr.yatak), baslik:safeN(S.pr.baslik), baza:safeN(S.pr.baza), kanepe:safeN(S.pr.kanepe), tekstil:safeN(S.pr.tekstil) },
+    mpr: mprClean,
+    kdv: safeN(S.kdv),
+    oh:  { gu:safeN(S.oh.gu), an:safeN(S.oh.an), fn:safeN(S.oh.fn), am:safeN(S.oh.am), sn:safeN(S.oh.sn), fr:safeN(S.oh.fr) },
+    koh: { gu:safeN(S.koh.gu), an:safeN(S.koh.an), fn:safeN(S.koh.fn), am:safeN(S.koh.am), sn:safeN(S.koh.sn), fr:safeN(S.koh.fr), isSabit:safeN(S.koh.is_sabit) },
+    isc: iscClean,
+    tr:  trClean,
+    trm: trMetaClean,
+    tgm: tgmClean,
+    kgm: kgmClean,
+    sgm: sgmClean,
+    xgr: xgrClean,
+    xpr: xprClean,
+    xmeta: xmetaClean,
+    alog: auditLog,
+    yr:  cleanSizedRecipes(S.yr),
+    brr: cleanSizedRecipes(S.br),
+    bzrr:cleanSizedRecipes(S.bzr),
+    krr: cleanKRecipes(S.kr),
+    mats:newMats,
+    at:  new Date().toISOString()
+  };
+
+  var bodyStr;
+  try {
+    bodyStr = JSON.stringify(payload);
+    console.log('Firebase kayıt boyutu:', (bodyStr.length/1024).toFixed(1)+'KB, key sayıları — yr:'+Object.keys(payload.yr||{}).length+' brr:'+Object.keys(payload.brr||{}).length+' bzrr:'+Object.keys(payload.bzrr||{}).length+' krr:'+Object.keys(payload.krr||{}).length+' mp:'+((payload.mp||[]).length)+' mats:'+((payload.mats||[]).length)+' tr:'+Object.keys(payload.tr||{}).length);
+  } catch(je){
+    SAVE_PENDING = false;
+    toast('\u274C JSON hatası: '+je.message, 'err', 5000);
+    console.error('JSON stringify hatası:', je);
+    return;
+  }
+
+  // Firebase key doğrulama — yasak karakterleri bul ve düzelt
+  function sanitizeKeys(obj, path){
+    if(obj===null || obj===undefined || typeof obj!=='object') return obj;
+    if(Array.isArray(obj)) return obj.map(function(item,i){return sanitizeKeys(item, path+'['+i+']');});
+    var out={};
+    Object.keys(obj).forEach(function(k){
+      var bad=/[.#$/\[\]]/.test(k);
+      var empty=!k || k.trim()==='';
+      if(empty){
+        console.warn('Firebase: boş key atlandı, path='+path);
+        return;
+      }
+      var safeKey=bad?fbEnc(k):k;
+      if(bad) console.warn('Firebase: yasak key düzeltildi: "'+k+'" → "'+safeKey+'" path='+path);
+      out[safeKey]=sanitizeKeys(obj[k], path+'.'+safeKey);
+    });
+    return out;
+  }
+  var safePayload=sanitizeKeys(payload,'root');
+  bodyStr=JSON.stringify(safePayload);
+  saveLocalBackup({S:S,materials:D.materials,at:new Date().toISOString()});
+
+  if(bodyStr===LAST_SAVED_HASH){
+    SAVE_PENDING = false;
+    return;
+  }
+  var pendingHash = bodyStr;
+
+  fetch(FB_URL + '.json' + fbAuthQuery(), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: bodyStr
+  }).then(function(r){
+    SAVE_PENDING = false;
+    if(r.ok){
+      LAST_SAVED_HASH = pendingHash;
+      FB_WRITE_OK = true;
+      LAST_MP_VALUES = snapshotMP();
+      MANUAL_EDIT = false;
+      saveLocalRevision('save-ok');
+      setSyncStatus('✅ Buluta kaydedildi ('+(new Date()).toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'})+')','ok');
+      toast('\u2705 Kaydedildi', 'ok', 2500);
+    } else {
+      r.text().then(function(t){
+        FB_WRITE_OK = false;
+        MANUAL_EDIT = false;
+        setSyncStatus('Firebase hatası — yerelde kaldı','err');
+        toast('\u274C Firebase: '+t.substring(0,120), 'err', 8000);
+        console.error('Firebase PATCH error', r.status, t);
+      });
+    }
+  }).catch(function(e){
+    SAVE_PENDING = false;
+    FB_WRITE_OK = false;
+    MANUAL_EDIT = false;
+    setSyncStatus('Ağ hatası — yerelde kaldı','err');
+    toast('\u274C Ag hatasi: '+e.message, 'err', 5000);
+  });
+}
+
+// Debounced otomatik kayıt — son değişiklikten 2 saniye sonra
+function autoSave(){
+  clearTimeout(AUTO_SAVE_TIMER);
+  AUTO_SAVE_TIMER = setTimeout(saveToFirebase, 2000);
+}
+
+// Tüm input değişikliklerini dinle
 document.addEventListener('change', function(e){
   var t = e.target;
+  // Fiyat inputları, select'ler (kâr oranı, KDV vs.) değişince kaydet
   if(t.classList.contains('pi') || t.classList.contains('fs') || t.classList.contains('si')){
     MANUAL_EDIT = true;
     setSyncStatus('Değişiklik işlendi, kaydediliyor...','saving');
     saveLocalBackup({S:S,materials:D.materials,at:new Date().toISOString()});
+    if(!FB_READY) return;
     autoSave();
   }
 });
 document.addEventListener('input', function(e){
   var t=e.target;
   if(t.classList.contains('pi') || t.classList.contains('si')){
+    // Blur beklemeden yenilemede veri kaybını önler
     MANUAL_EDIT = true;
     setSyncStatus('Değişiklik işlendi...','saving');
     saveLocalBackup({S:S,materials:D.materials,at:new Date().toISOString()});
   }
 });
 
-// Periyodik kayıt — 60 saniyede bir
-setInterval(function(){ saveToLocal(); }, 60000);
+// Periyodik kayıt — 60 saniyede bir (ekstra güvenlik)
+setInterval(function(){ if(FB_READY) saveToFirebase(); }, 60000);
 
 // Sayfa kapanırken kaydet
 window.addEventListener('beforeunload', function(){
   BEFORE_UNLOAD = true;
   saveLocalBackup({S:S,materials:D.materials,at:new Date().toISOString()});
   if(AUTO_SAVE_TIMER) clearTimeout(AUTO_SAVE_TIMER);
-  saveToLocal();
+  if(FB_READY) saveToFirebase();
 });
 
 // ========== BAŞLAT ==========
 document.body.insertAdjacentHTML('beforeend',
+  '<div id="auth-gate" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:700;align-items:center;justify-content:center"></div>' +
+  '<div id="fb-loading" style="display:none">' +
+    '<div class="spin"></div>' +
+    '<p>Firebase\'den son fiyatlar yükleniyor...</p>' +
+  '</div>' +
   '<div id="fb-toast"></div>' +
   '<div id="fb-sync"></div>'
 );
-
+// Bu cihazda daha once giris yapildiysa: sifre sormadan otomatik oturum ac
 (function(){
-  var local = loadLocalBackup();
-  if(local.ok){
-    toast('\u2705 Yerel veriler yüklendi', 'ok', 2000);
+  var savedRt = loadSavedRefreshToken();
+  if(savedRt){
+    FB_REFRESH_TOKEN = savedRt;
+    showFBLoading('Oturum açılıyor...');
+    refreshIdToken().then(function(){
+      showLogoutBtn();
+      showFBLoading('Firebase\'den son fiyatlar yükleniyor...');
+      loadFromFirebase();
+    }).catch(function(){
+      clearAuth();
+      hideFBLoading();
+      openAuthGate();
+    });
   } else {
-    toast('\u2139\ufe0f İlk kullanım — varsayılan veriler aktif', '', 2500);
+    openAuthGate();
   }
-  LAST_MP_VALUES = snapshotMP();
-  rXNav();
-  R();
-  // 2 saniye sonra yedek hatırlatması kontrol et
-  setTimeout(checkBackupReminder, 2000);
 })();
+
+// v11/v12 yedek-hatirlatma ozelligini koru
+setTimeout(function(){ if(typeof checkBackupReminder==='function') checkBackupReminder(); }, 2000);
 
 </script>
 </body>
