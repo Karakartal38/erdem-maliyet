@@ -5,6 +5,45 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Erdem Yatakları - Maliyet Yönetim Sistemi</title>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- PWA: bilgisayara/telefona uygulama gibi yuklenebilir -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Erdem Maliyet">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script>
+/* Service worker kaydi - yuklenebilirlik + cevrimdisi kabuk */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('SW kaydi basarisiz', e); });
+  });
+}
+/* "Uygulamayi Yukle" butonu (Chrome/Edge) */
+(function () {
+  var deferred = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault(); deferred = e; showInstallBtn();
+  });
+  function showInstallBtn() {
+    if (document.getElementById('pwaInstallBtn')) return;
+    var b = document.createElement('button');
+    b.id = 'pwaInstallBtn';
+    b.textContent = '⬇ Uygulamayı Yükle';
+    b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;background:#f59e0b;color:#0f1117;border:none;padding:10px 16px;border-radius:10px;font-weight:700;font-family:inherit;font-size:13px;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.4)';
+    b.onclick = function () {
+      if (!deferred) return;
+      deferred.prompt();
+      deferred.userChoice.then(function () { deferred = null; b.remove(); });
+    };
+    (document.body || document.documentElement).appendChild(b);
+  }
+  window.addEventListener('appinstalled', function () {
+    var b = document.getElementById('pwaInstallBtn'); if (b) b.remove();
+  });
+})();
+</script>
 <style>
 :root{--bg:#0f1117;--s:#1a1d27;--s2:#242836;--br:#2e3347;--t:#e8eaf0;--t2:#9198ab;--a:#f59e0b;--a2:#f97316;--g:#22c55e;--r:#ef4444;--b:#3b82f6;--p:#8b5cf6}
 *{margin:0;padding:0;box-sizing:border-box}
