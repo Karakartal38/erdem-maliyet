@@ -17,9 +17,53 @@
 /* Service worker kaydi - yuklenebilirlik + cevrimdisi kabuk */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function () {
-    navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('SW kaydi basarisiz', e); });
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      // sw.js degisirse yeni surumu sessizce al
+      setInterval(function () { try { reg.update(); } catch (e) {} }, 60000);
+    }).catch(function (e) { console.warn('SW kaydi basarisiz', e); });
   });
 }
+/* ==== OTOMATIK GUNCELLEME ====
+   Yeni surum yayinlaninca (index.html degisince) acik tum sekmeler kendiliginden
+   guncel surume gecer. Kayit PATCH (ekleyici) oldugundan yenilemede veri kaybi olmaz;
+   kullanici bir alana yaziyorsa yenileme bir sonraki kontrole ertelenir. */
+(function () {
+  var initialTag = null, reloading = false;
+  function tagUrl() {
+    var p = location.pathname;
+    if (p.charAt(p.length - 1) === '/') { p += 'index.html'; }
+    return p + '?_t=' + Date.now();
+  }
+  function isTyping() {
+    var a = document.activeElement;
+    return !!a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable);
+  }
+  function doReload() {
+    if (reloading) { return; }
+    reloading = true;
+    try {
+      if (typeof toast === 'function') { toast('⬆️ Yeni surum yukleniyor…', '', 2000); }
+      if (typeof saveToFirebase === 'function') { saveToFirebase(); }
+      else if (typeof saveToLocal === 'function') { saveToLocal(); }
+    } catch (e) {}
+    setTimeout(function () { location.reload(); }, 900);
+  }
+  function checkUpdate() {
+    if (reloading) { return; }
+    fetch(tagUrl(), { method: 'HEAD', cache: 'no-store' }).then(function (r) {
+      if (!r || !r.ok) { return; }
+      var tag = r.headers.get('ETag') || r.headers.get('Last-Modified');
+      if (!tag) { return; }
+      if (initialTag === null) { initialTag = tag; return; }
+      if (tag !== initialTag && !isTyping()) { doReload(); }
+    }).catch(function () {});
+  }
+  checkUpdate();
+  setInterval(checkUpdate, 60000);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { checkUpdate(); }
+  });
+})();
 /* "Uygulamayi Yukle" butonu (Chrome/Edge) */
 (function () {
   var deferred = null;
